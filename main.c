@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "dark_chess_client.h"
+#include <windows.h>
+#include <time.h>
 
 // --- Helper Functions for JSON parsing ---
 void get_piece_at(const char* json, int index, char* out_piece) {
@@ -57,100 +59,130 @@ int get_piece_rank(const char* piece) {
     return 0; // Null or Covered
 }
 
-int can_capture(int my_rank, int opp_rank) {
-    if (opp_rank == 0) return 0; // Cannot capture Covered or Null this way
-    // Soldier beats King
-    if (my_rank == 1 && opp_rank == 7) return 1;
-    // King cannot beat Soldier
-    if (my_rank == 7 && opp_rank == 1) return 0;
-    // Cannons capture anything (handled separately by jump logic, but logically valid)
-    if (my_rank == 2) return 1; 
-    // Normal rule
-    return my_rank >= opp_rank;
+int can_capture(const char* attacker, const char* victim) {
+    if (strcmp(victim, "Null") == 0) return 1; // Always legal to move to empty space
+    if (strcmp(victim, "Covered") == 0) return 0; // Cannot capture covered pieces
+
+    int a_rank = get_piece_rank(attacker);
+    int v_rank = get_piece_rank(victim);
+
+    // Rule: Soldier (1) can capture King (7) or another Soldier (1)
+    if (a_rank == 1) {
+        return (v_rank == 7 || v_rank == 1);
+    }
+    
+    // Rule: King (7) can capture everything EXCEPT Soldier (1)
+    if (a_rank == 7) {
+        return (v_rank != 1);
+    }
+
+    // Rule: Cannon (2) captures by jumping (not handled in adjacent logic)
+    // Most rules state Cannons cannot capture adjacently at all.
+    if (a_rank == 2) return 0; 
+
+    // Standard Rule: Rank must be greater than or equal to victim
+    return a_rank >= v_rank;
 }
 
 void make_move(const char* json, const char* my_role_ab) {
-    char piece[32], my_color[10], opp_color[10];
+    char my_color[10], piece[32], target[32], action[64];
     get_role_color(json, my_role_ab, my_color);
+    char opp_color[10];
     strcpy(opp_color, strcmp(my_color, "Red") == 0 ? "Black" : "Red");
 
-    printf("I am playing as %s.\n", strcmp(my_color, "None") == 0 ? "Unknown yet" : my_color);
-
-    // 1. Scan the 4x8 board (32 squares) for "Covered" pieces
-    int covered_indices[32];
-    int covered_count = 0;
-
+    // 1. PRIORITY 1: ATTACK! (Check all my pieces for legal captures)
     for (int i = 0; i < 32; i++) {
         get_piece_at(json, i, piece);
-        if (strcmp(piece, "Covered") == 0) {
-            covered_indices[covered_count] = i;
-            covered_count++;
+        if (strstr(piece, my_color) && strcmp(piece, "Covered") != 0) {
+            int r = i / 8, c = i % 8;
+            int dirs[4][2] = {{0,1}, {0,-1}, {1,0}, {-1,0}};
+
+            for (int d = 0; d < 4; d++) {
+                int tr = r + dirs[d][0], tc = c + dirs[d][1];
+                if (tr >= 0 && tr < 4 && tc >= 0 && tc < 8) {
+                    int target_idx = tr * 8 + tc;
+                    get_piece_at(json, target_idx, target);
+
+                    // Check if target is an enemy AND rank is okay
+                    if (strstr(target, opp_color) && can_capture(piece, target)) {
+                        sprintf(action, "%d %d %d %d\n", r, c, tr, tc);
+                        printf("AI Action: CAPTURE %s with %s\n", target, piece);
+                        Sleep(2000);
+                        send_action(action);
+                        return;
+                    }
+                }
+            }
         }
     }
 
-    char action[50];
-
-    // 2. If there are covered pieces, pick a random one to flip!
-    if (covered_count > 0) {
-        int random_choice = rand() % covered_count;
-        int target_index = covered_indices[random_choice];
-        
-        // Convert the 1D index (0-31) to 2D Row/Col (0-3, 0-7)
-        int r = target_index / 8;
-        int c = target_index % 8;
-        
-        // Format exactly as the documentation strictly requires: "r c\n"
-        sprintf(action, "%d %d\n", r, c);
-        
-        printf("AI Decision: Flipping piece at Index %d (Row %d, Col %d)\n", target_index, r, c);
-        
-        // Pause for 2 seconds to keep the server happy
-        Sleep(2000); 
-        
+    // 2. PRIORITY 2: REVEAL! (If no captures, flip a random piece)
+    int covered[32], count = 0;
+    for (int i = 0; i < 32; i++) {
+        get_piece_at(json, i, piece);
+        if (strcmp(piece, "Covered") == 0) covered[count++] = i;
+    }
+    if (count > 0) {
+        int idx = covered[rand() % count];
+        sprintf(action, "%d %d\n", idx / 8, idx % 8);
+        printf("AI Action: FLIPPING index %d\n", idx);
+        Sleep(2000);
         send_action(action);
-    } else {
-        // Eventually, the board will be fully flipped.
-        printf("No pieces left to flip! (We need to add movement logic here)\n");
-        
+        return;
+    }
+
+    // 3. PRIORITY 3: MOVE! (If nothing to flip, move to a random empty space)
+    for (int i = 0; i < 32; i++) {
+        get_piece_at(json, i, piece);
+        if (strstr(piece, my_color) && strcmp(piece, "Covered") != 0) {
+            int r = i / 8, c = i % 8;
+            int dirs[4][2] = {{0,1}, {0,-1}, {1,0}, {-1,0}};
+            for (int d = 0; d < 4; d++) {
+                int tr = r + dirs[d][0], tc = c + dirs[d][1];
+                if (tr >= 0 && tr < 4 && tc >= 0 && tc < 8) {
+                    get_piece_at(json, tr * 8 + tc, target);
+                    if (strcmp(target, "Null") == 0) {
+                        sprintf(action, "%d %d %d %d\n", r, c, tr, tc);
+                        printf("AI Action: MOVING %s to empty space\n", piece);
+                        Sleep(2000);
+                        send_action(action);
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 
 int main() {
+    srand(time(NULL));
     char board_data[4000];
     int last_total_moves = -1;
 
     if (init_connection() != 0) return 1;
     auto_join_room();
 
-    // Determine our role string for JSON parsing
     char my_role_ab[2] = "";
     if (strcmp(_assigned_role, "first") == 0) strcpy(my_role_ab, "A");
     else if (strcmp(_assigned_role, "second") == 0) strcpy(my_role_ab, "B");
-    else strcpy(my_role_ab, _assigned_role); // Fallback if server directly assigns "A" or "B"
+    else strcpy(my_role_ab, _assigned_role);
 
     printf("Waiting for server updates...\n");
 
     while (1) {
         receive_update(board_data, 4000);
-        printf("%s", board_data);
-        if (strlen(board_data) == 0) {
-            printf("Server closed the connection.\n");
-            break;
-        }
+        if (strlen(board_data) == 0) break;
 
         if (strstr(board_data, "UPDATE")) {
             int current_total_moves = -1;
             char* moves_p = strstr(board_data, "\"total_moves\":");
-            if (moves_p) {
-                sscanf(moves_p + 14, "%d", &current_total_moves);
-            }
+            if (moves_p) sscanf(moves_p + 14, "%d", &current_total_moves);
 
             const char* turn_role_p = strstr(board_data, "\"current_turn_role\": \"");
             if (turn_role_p) {
                 turn_role_p += 22;
                 char current_turn_role[2] = { turn_role_p[0], '\0' };
                 
-                // Act only if it is our turn AND the server has registered a new move state
                 if (strcmp(current_turn_role, my_role_ab) == 0 && current_total_moves != last_total_moves) {
                     printf("\n--- My Turn! (Move %d) ---\n", current_total_moves);
                     make_move(board_data, my_role_ab);
@@ -159,7 +191,6 @@ int main() {
             }
         }
     }
-    
     close_connection();
     return 0;
 }
