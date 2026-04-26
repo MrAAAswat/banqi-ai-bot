@@ -35,17 +35,28 @@ int init_connection() {
 // 2. 加入房間並取得角色
 void auto_join_room() {
     char user_input[100];
+    char send_buffer[150]; // Added to hold the clean string
     char response[2000];
+    
     while (1) {
         printf("\nPlease enter JOIN <room_id> to start: ");
         if (fgets(user_input, sizeof(user_input), stdin) == NULL) break;
         
-        send(_global_socket, user_input, strlen(user_input), 0);
+        // --- THE CRITICAL WINDOWS FIX ---
+        // 1. Strip ALL hidden newline characters so the \r doesn't confuse the server
+        user_input[strcspn(user_input, "\r")] = '\0';
+        user_input[strcspn(user_input, "\n")] = '\0';
+        
+        // 2. Add exactly ONE clean \n so the server knows the line is finished
+        sprintf(send_buffer, "%s\n", user_input);
+        
+        // Send the clean buffer instead of the raw user_input
+        send(_global_socket, send_buffer, strlen(send_buffer), 0);
 
         int size = recv(_global_socket, response, 1999, 0);
         if (size > 0) {
             response[size] = '\0';
-            printf("[Server]: %s", response);
+            printf("[Server]: %s\n", response);
             if (strstr(response, "SUCCESS")) {
                 // 提取 ROLE
                 char* role_ptr = strstr(response, "ROLE ");
